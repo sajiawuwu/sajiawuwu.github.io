@@ -23,7 +23,7 @@
         
             <copyright>[CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/deed.en)</copyright>
         
-        <lastBuildDate>Sun, 02 Aug 2020 06:54:45 &#43;0000</lastBuildDate>
+        <lastBuildDate>Wed, 05 Aug 2020 14:29:52 &#43;0000</lastBuildDate>
         
             <atom:link rel="self" type="application/rss&#43;xml" href="https://jun33.top/rss.xml" />
         
@@ -9886,16 +9886,1270 @@ Compiled method (c1)     243    7       3       java.lang.String::equals (50 byt
             </item>
         
             <item>
-                <title>测试文章脚本</title>
-                <link>https://jun33.top/posts/%E6%B5%8B%E8%AF%95%E6%96%87%E7%AB%A0%E8%84%9A%E6%9C%AC/</link>
-                <guid isPermaLink="true">https://jun33.top/posts/%E6%B5%8B%E8%AF%95%E6%96%87%E7%AB%A0%E8%84%9A%E6%9C%AC/</guid>
-                <pubDate>Sun, 02 Aug 2020 14:52:36 &#43;0800</pubDate>
+                <title>WebMagic之Spider进阶</title>
+                <link>https://jun33.top/posts/webmagic%E4%B9%8Bspider%E8%BF%9B%E9%98%B6/</link>
+                <guid isPermaLink="true">https://jun33.top/posts/webmagic%E4%B9%8Bspider%E8%BF%9B%E9%98%B6/</guid>
+                <pubDate>Tue, 04 Aug 2020 23:59:21 &#43;0800</pubDate>
                 
                     <author>reuixiy@gmail.com (reuixiy)</author>
                 
                 <copyright>[CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/deed.en)</copyright>
                 
-                    <description>&lt;h3 id=&#34;测试一下文章脚本&#34;&gt;测试一下文章脚本！！！~~~&lt;/h3&gt;
+                    <description>&lt;h1 id=&#34;webmagic之spider进阶&#34;&gt;WebMagic之Spider进阶&lt;/h1&gt;
+&lt;p&gt;从解决问题开始吧。&lt;/p&gt;
+&lt;p&gt;问题描述：由于数据库的数据量特别大，而且公司没有搞主从读写分离，导致从数据库读取数据比较慢，而我需要从数据库查询出特定标识来拼url去抓。实际运行中就发现了一个有趣的现象。爬虫抓取的速度超过了我用scheduler给它推送url的速度，导致爬虫从scheduler获取不到url,同时此刻线程池所有线程都已停止。这个时候，根据Spider的机制是要退出调度循环的，从而终止Spider。从下面代码可以看出：(取自Spider的run方法):&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;        while ((!(Thread.currentThread().isInterrupted()))
+                &amp;amp;&amp;amp; (this.stat.get() == 1)) {
+            Request request = this.scheduler.poll(this);
+            if (request == null) {
+                if ((this.threadPool.getThreadAlive() == 0)
+                        &amp;amp;&amp;amp; (this.exitWhenComplete)) {
+                    break;
+                }
+
+                waitNewUrl();
+            } else {
+                Request requestFinal = request;
+                this.threadPool.execute(new Runnable(requestFinal) {
+                    public void run() {
+                        try {
+                            Spider.this.processRequest(this.val$requestFinal);
+                            Spider.this.onSuccess(this.val$requestFinal);
+                        } catch (Exception e) {
+                            Spider.this.onError(this.val$requestFinal);
+                            Spider.this.logger.error(&amp;quot;process request &amp;quot;
+                                    + this.val$requestFinal + &amp;quot; error&amp;quot;, e);
+                        } finally {
+                            Spider.this.pageCount.incrementAndGet();
+                            Spider.this.signalNewUrl();
+                        }
+                    }
+                });
+            }
+        }
+        this.stat.set(2);
+
+        if (this.destroyWhenExit)
+            close();
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;上述中，由于Spider默认exitWhenComplete=true,而this.threadPool.getThreadAlive() == 0也在我刚刚描述的场景中应验了，所以此时Spider会break退出调度循环，进而终止。&lt;/p&gt;
+&lt;p&gt;那么如何解决呢？我们应该注意到了exitWhenComplete这个标志，Spider是开放了这个标志的setter的，那么我们可以通过它来实现自定义的管理。如何管理?&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;                //设置exitWhenComplete=false，避免scheduler.poll返回null，且没有工作线程时退出循环。
+                spider.setExitWhenComplete(false);
+                spider.start();
+                //分页循环推送url
+                int i=2;
+                while(i&amp;lt;=page.getTotalPages()){
+                    page=storeManager.findPage(c, i, 50);
+                    for(Store s:page.getResult()){
+                        if(StringUtils.isNotBlank(s.getSkipLink()) &amp;amp;&amp;amp; s.getSkipLink().contains(&amp;quot;?id=&amp;quot;)){
+                            Request request=new Request(s.getSkipLink());
+                            scheduler.push(request,spider);
+                        }
+                    }
+                    i++;
+                }
+                int nullCount=0;
+                //分5次重试来确保真的没有了。
+                while(nullCount&amp;lt;5){
+                    //如果没有活动线程，我们就查看scheduler中是否有request,如果没有，计数+1,之后休眠再重新循环。
+                    if(spider.getThreadAlive()==0){
+                        Request req=scheduler.poll(spider);
+                        if(req==null){
+                            nullCount++;
+                        }else{
+                            if(nullCount&amp;gt;0){
+                                nullCount=0;
+                            }
+                            scheduler.push(req, spider);
+                        }
+                    }
+                    HttpReqUtil.sleep(5*60*1000);
+                }
+                //退出检测循环说明结束了，手动调用stop()来是Spider退出调度循环，终止爬虫。
+                spider.stop();
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;其实，如果你想Spider池化，也可以采用这个思路来。&lt;/p&gt;
+</description>
+                
+                
+                
+                
+                
+                    
+                        
+                    
+                        
+                    
+                
+            </item>
+        
+            <item>
+                <title>爬虫框架WebMagic源码分析之Selenium</title>
+                <link>https://jun33.top/posts/%E7%88%AC%E8%99%AB%E6%A1%86%E6%9E%B6webmagic%E6%BA%90%E7%A0%81%E5%88%86%E6%9E%90%E4%B9%8Bselenium/</link>
+                <guid isPermaLink="true">https://jun33.top/posts/%E7%88%AC%E8%99%AB%E6%A1%86%E6%9E%B6webmagic%E6%BA%90%E7%A0%81%E5%88%86%E6%9E%90%E4%B9%8Bselenium/</guid>
+                <pubDate>Tue, 04 Aug 2020 23:58:17 &#43;0800</pubDate>
+                
+                    <author>reuixiy@gmail.com (reuixiy)</author>
+                
+                <copyright>[CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/deed.en)</copyright>
+                
+                    <description>&lt;h1 id=&#34;爬虫框架webmagic源码分析之selenium&#34;&gt;爬虫框架WebMagic源码分析之Selenium&lt;/h1&gt;
+&lt;p&gt;webmagic有一个selenium模块,其中实现了一个SeleniumDownloader。但是感觉灵活性不大。所以我就自己参考实现了一个。&lt;/p&gt;
+&lt;p&gt;首先是WebDriverPool用来管理WebDriver池：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;import java.util.ArrayList;
+import java.util.concurrent.BlockingDeque;
+import java.util.concurrent.LinkedBlockingDeque;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+
+import org.openqa.selenium.WebDriver;
+import org.openqa.selenium.phantomjs.PhantomJSDriver;
+import org.openqa.selenium.phantomjs.PhantomJSDriverService;
+import org.openqa.selenium.remote.DesiredCapabilities;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import net.xby1993.common.util.FileUtil;
+
+/**
+ * @author taojw
+ */
+public class WebDriverPool {
+    private Logger logger = LoggerFactory.getLogger(getClass());
+
+    private int CAPACITY = 5;
+    private AtomicInteger refCount = new AtomicInteger(0);
+    private static final String DRIVER_PHANTOMJS = &amp;quot;phantomjs&amp;quot;;
+
+    /**
+     * store webDrivers available
+     */
+    private BlockingDeque&amp;lt;WebDriver&amp;gt; innerQueue = new LinkedBlockingDeque&amp;lt;WebDriver&amp;gt;(
+            CAPACITY);
+
+    private static String PHANTOMJS_PATH;
+    private static DesiredCapabilities caps = DesiredCapabilities.phantomjs();
+    static {
+        PHANTOMJS_PATH = FileUtil.getCommonProp(&amp;quot;phantomjs.path&amp;quot;);
+        caps.setJavascriptEnabled(true);
+        caps.setCapability(
+                PhantomJSDriverService.PHANTOMJS_EXECUTABLE_PATH_PROPERTY,
+                PHANTOMJS_PATH);
+        caps.setCapability(&amp;quot;takesScreenshot&amp;quot;, false);
+        caps.setCapability(
+                PhantomJSDriverService.PHANTOMJS_PAGE_CUSTOMHEADERS_PREFIX
+                        + &amp;quot;User-Agent&amp;quot;,
+                &amp;quot;Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/50.0.2661.102 Safari/537.36&amp;quot;);
+        ArrayList&amp;lt;String&amp;gt; cliArgsCap = new ArrayList&amp;lt;String&amp;gt;();
+        //http://phantomjs.org/api/command-line.html
+        cliArgsCap.add(&amp;quot;--web-security=false&amp;quot;);
+        cliArgsCap.add(&amp;quot;--ssl-protocol=any&amp;quot;);
+        cliArgsCap.add(&amp;quot;--ignore-ssl-errors=true&amp;quot;);
+        cliArgsCap.add(&amp;quot;--load-images=false&amp;quot;); //不加载图片
+        caps.setCapability(PhantomJSDriverService.PHANTOMJS_CLI_ARGS,
+                cliArgsCap);
+        caps.setCapability(
+                PhantomJSDriverService.PHANTOMJS_GHOSTDRIVER_CLI_ARGS,
+                new String[] {&amp;quot;--logLevel=INFO&amp;quot;});
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;​ &lt;br&gt;
+}&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;    public WebDriverPool() {
+    }
+
+    public WebDriverPool(int poolsize) {
+        this.CAPACITY = poolsize;
+        innerQueue = new LinkedBlockingDeque&amp;lt;WebDriver&amp;gt;(poolsize);
+    }
+
+    public WebDriver get() throws InterruptedException {
+        WebDriver poll = innerQueue.poll();
+        if (poll != null) {
+            return poll;
+        }
+        if (refCount.get() &amp;lt; CAPACITY) {
+            synchronized (innerQueue) {
+                if (refCount.get() &amp;lt; CAPACITY) {
+
+                    WebDriver mDriver = new PhantomJSDriver(caps);
+                    // 尝试性解决：https://github.com/ariya/phantomjs/issues/11526问题
+                    mDriver.manage().timeouts()
+                            .pageLoadTimeout(60, TimeUnit.SECONDS);
+                    // mDriver.manage().window().setSize(new Dimension(1366,
+                    // 768));
+                    innerQueue.add(mDriver);
+                    refCount.incrementAndGet();
+                }
+            }
+        }
+        return innerQueue.take();
+    }
+
+    public void returnToPool(WebDriver webDriver) {
+        // webDriver.quit();
+        // webDriver=null;
+        innerQueue.add(webDriver);
+    }
+
+    public void close(WebDriver webDriver) {
+        refCount.decrementAndGet();
+        webDriver.quit();
+        webDriver = null;
+    }
+
+    public void shutdown() {
+        try {
+            for (WebDriver driver : innerQueue) {
+                close(driver);
+            }
+            innerQueue.clear();
+        } catch (Exception e) {
+//            e.printStackTrace();
+            logger.warn(&amp;quot;webdriverpool关闭失败&amp;quot;,e);
+        }
+    }
+}
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;之后便是SeleniumDownloader&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;import org.openqa.selenium.By;
+import org.openqa.selenium.Cookie;
+import org.openqa.selenium.WebDriver;
+import org.openqa.selenium.WebElement;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import us.codecraft.webmagic.Page;
+import us.codecraft.webmagic.Request;
+import us.codecraft.webmagic.Site;
+import us.codecraft.webmagic.Task;
+import us.codecraft.webmagic.downloader.Downloader;
+import us.codecraft.webmagic.selector.Html;
+import us.codecraft.webmagic.selector.PlainText;
+import us.codecraft.webmagic.utils.UrlUtils;
+
+import java.util.Map;
+
+/**
+ * @author taojw
+ *
+ */
+public class SeleniumDownloader  implements Downloader{
+    private static final Logger log=LoggerFactory.getLogger(SeleniumDownloader.class);
+    private int sleepTime=3000;//3s
+    private SeleniumAction action=null;
+    private WebDriverPool webDriverPool=new WebDriverPool();
+    public SeleniumDownloader(){
+    }
+    public SeleniumDownloader(int sleepTime,WebDriverPool pool){
+        this(sleepTime,pool,null);
+    }
+    public SeleniumDownloader(int sleepTime,WebDriverPool pool,SeleniumAction action){
+        this.sleepTime=sleepTime;
+        this.action=action;
+        if(pool!=null){
+            webDriverPool=pool;
+        }
+    }
+    public SeleniumDownloader setSleepTime(int sleepTime) {
+        this.sleepTime = sleepTime;
+        return this;
+    }
+    public void setOperator(SeleniumAction action){
+        this.action=action;
+    }
+    @Override
+    public Page download(Request request, Task task) {
+        WebDriver webDriver;
+        try {
+            webDriver = webDriverPool.get();
+        } catch (InterruptedException e) {
+            log.warn(&amp;quot;interrupted&amp;quot;, e);
+            return null;
+        }
+        log.info(&amp;quot;downloading page &amp;quot; + request.getUrl());
+        Page page = new Page();
+        try {
+            webDriver.get(request.getUrl());
+            Thread.sleep(sleepTime);
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+        } catch (Exception e) {
+            webDriverPool.close(webDriver);
+            page.setSkip(true);
+            return page;
+        }
+//        WindowUtil.changeWindow(webDriver);
+        WebDriver.Options manage = webDriver.manage();
+        Site site = task.getSite();
+        if (site.getCookies() != null) {
+            for (Map.Entry&amp;lt;String, String&amp;gt; cookieEntry : site.getCookies()
+                    .entrySet()) {
+                Cookie cookie = new Cookie(cookieEntry.getKey(),
+                        cookieEntry.getValue());
+                manage.addCookie(cookie);
+            }
+        }
+        manage.window().maximize();
+        if(action!=null){
+            action.execute(webDriver);
+        }
+        SeleniumAction reqAction=(SeleniumAction) request.getExtra(&amp;quot;action&amp;quot;);
+        if(reqAction!=null){
+            reqAction.execute(webDriver);
+        }
+
+        WebElement webElement = webDriver.findElement(By.xpath(&amp;quot;/html&amp;quot;));
+        String content = webElement.getAttribute(&amp;quot;outerHTML&amp;quot;);
+        
+        page.setRawText(content);
+        page.setHtml(new Html(UrlUtils.fixAllRelativeHrefs(content,
+                webDriver.getCurrentUrl())));
+        page.setUrl(new PlainText(webDriver.getCurrentUrl()));
+        page.setRequest(request);
+        webDriverPool.returnToPool(webDriver);
+        return page;
+    }
+
+    @Override
+    public void setThread(int thread) {
+        
+    }
+
+}
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;这里的扩展性主要体现在，我加入了SeleniumAction接口，可以在SeleniumDownloader初始化的时候配置一个全局的SeleniumAction，以及为每个Request配置对应的SeleniumAction。 SeleniumAction接口如下：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;public interface SeleniumAction {
+    void execute(WebDriver driver);
+}
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;它会获得一个WebDriver实例，你可以在里面进行任意的Selenium操作。&lt;/p&gt;
+&lt;p&gt;本部分到此结束。&lt;/p&gt;
+</description>
+                
+                
+                
+                
+                
+                    
+                        
+                    
+                        
+                    
+                
+            </item>
+        
+            <item>
+                <title>爬虫框架WebMagic源码分析之Selector</title>
+                <link>https://jun33.top/posts/%E7%88%AC%E8%99%AB%E6%A1%86%E6%9E%B6webmagic%E6%BA%90%E7%A0%81%E5%88%86%E6%9E%90%E4%B9%8Bselector/</link>
+                <guid isPermaLink="true">https://jun33.top/posts/%E7%88%AC%E8%99%AB%E6%A1%86%E6%9E%B6webmagic%E6%BA%90%E7%A0%81%E5%88%86%E6%9E%90%E4%B9%8Bselector/</guid>
+                <pubDate>Tue, 04 Aug 2020 23:56:54 &#43;0800</pubDate>
+                
+                    <author>reuixiy@gmail.com (reuixiy)</author>
+                
+                <copyright>[CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/deed.en)</copyright>
+                
+                    <description>&lt;h1 id=&#34;爬虫框架webmagic源码分析之selector&#34;&gt;爬虫框架WebMagic源码分析之Selector&lt;/h1&gt;
+&lt;p&gt;1、Selector部分：&lt;br&gt;
+接口：&lt;br&gt;
+Selector：定义了根据字符串选择单个元素和选择多个元素的方法。&lt;br&gt;
+ElementSelector：定义了根据jsoup element选择单个、多个元素的方法。主要用于CSS、Xpath选择器.&lt;/p&gt;
+&lt;p&gt;抽象类：&lt;br&gt;
+BaseElementSelector，实现类前面说的两个接口，主要用于CSS、Xpath选择器继承。模板化接口方法，并定义了一些选择元素的方法由子类实现。&lt;/p&gt;
+&lt;p&gt;实现类：&lt;br&gt;
+CssSelector：Css选择器的实现类，继承BaseElementSelector。基本实现都是基于jsoup的css选择接口。&lt;br&gt;
+XpathSelector：xpath选择器的实现类，继承BaseElementSelector。基本实现都是采用作者自己基于jsoup实现的xsoup的相关接口。&lt;br&gt;
+RegexSelector：正则表达式选择器的实现类，仅实现了Selector接口。&lt;br&gt;
+JsonPathSelector：基于&lt;a href=&#34;https://github.com/jayway/JsonPath%E8%BF%99%E4%B8%AA%E5%BC%80%E6%BA%90%E5%BA%93%E5%AE%9E%E7%8E%B0%E7%9A%84json&#34;&gt;jayway/JsonPath&lt;/a&gt; path选择器。&lt;br&gt;
+ReplaceSelector:基于正则替换的选择器&lt;br&gt;
+SmartContentSelector：咱不明白其用途，被官方打上了实验性标记。&lt;br&gt;
+OrSelector：多个选择的情形，每个选择器各自独立选择，将所有结果合并。&lt;br&gt;
+AndSelector：多个选择的情形，流式管道选择，前一个选择的结果作为后一个选择的输入。&lt;/p&gt;
+&lt;p&gt;2、Selectable部分&lt;br&gt;
+接口：Selectable ：定义了一系列链式api调用方式，支持xpath,css,regex,jsonPath选择器，以及一些便利方法，如links获取该选择器下的全部链接。&lt;/p&gt;
+&lt;p&gt;抽象类：AbstractSelectable，定义了一些模板方法。&lt;/p&gt;
+&lt;p&gt;实现类HtmlNode、PlainText、Html(继承自HtmlNode)、Json(继承自PlainText)等。&lt;/p&gt;
+&lt;p&gt;这部分源码就不做分析了。&lt;/p&gt;
+&lt;p&gt;这里需要提到的一点是：&lt;br&gt;
+Page.getHtml()返回的Html不支持JsonPath选择，Page.getJson()返回的Json对象支持JsonPath选择。&lt;/p&gt;
+&lt;p&gt;选择器部分到此结束吧。&lt;/p&gt;
+&lt;p&gt;下篇主题待定。&lt;/p&gt;
+</description>
+                
+                
+                
+                
+                
+                    
+                        
+                    
+                        
+                    
+                
+            </item>
+        
+            <item>
+                <title>爬虫框架WebMagic源码分析之Downloader</title>
+                <link>https://jun33.top/posts/%E7%88%AC%E8%99%AB%E6%A1%86%E6%9E%B6webmagic%E6%BA%90%E7%A0%81%E5%88%86%E6%9E%90%E4%B9%8Bdownloader/</link>
+                <guid isPermaLink="true">https://jun33.top/posts/%E7%88%AC%E8%99%AB%E6%A1%86%E6%9E%B6webmagic%E6%BA%90%E7%A0%81%E5%88%86%E6%9E%90%E4%B9%8Bdownloader/</guid>
+                <pubDate>Tue, 04 Aug 2020 23:55:28 &#43;0800</pubDate>
+                
+                    <author>reuixiy@gmail.com (reuixiy)</author>
+                
+                <copyright>[CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/deed.en)</copyright>
+                
+                    <description>&lt;h1 id=&#34;爬虫框架webmagic源码分析之downloader&#34;&gt;爬虫框架WebMagic源码分析之Downloader&lt;/h1&gt;
+&lt;p&gt;Downloader是负责请求url获取返回值（html、json、jsonp等）的一个组件。当然会同时处理POST重定向、Https验证、ip代理、判断失败重试等。&lt;/p&gt;
+&lt;p&gt;接口：Downloader 定义了download方法返回Page，定义了setThread方法来请求的设置线程数。&lt;br&gt;
+抽象类：AbstractDownloader。 定义了重载的download方法返回Html，同时定义了onSuccess、onError状态方法，并定义了addToCycleRetry来判断是否需要进行重试。&lt;br&gt;
+实现类：HttpClientDownloader。负责通过HttpClient下载页面&lt;br&gt;
+辅助类：HttpClientGenerator。负责生成HttpClient实例。&lt;/p&gt;
+&lt;p&gt;1、AbstractDownloader&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;public Html download(String url, String charset) {
+        Page page = download(new Request(url), Site.me().setCharset(charset).toTask());
+        return (Html) page.getHtml();
+    }
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;这里download逻辑很简单，就是调用子类实现的download下载。&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;protected Page addToCycleRetry(Request request, Site site) {
+        Page page = new Page();
+        Object cycleTriedTimesObject = request.getExtra(Request.CYCLE_TRIED_TIMES);
+        if (cycleTriedTimesObject == null) {
+            page.addTargetRequest(request.setPriority(0).putExtra(Request.CYCLE_TRIED_TIMES, 1));
+        } else {
+            int cycleTriedTimes = (Integer) cycleTriedTimesObject;
+            cycleTriedTimes++;
+            if (cycleTriedTimes &amp;gt;= site.getCycleRetryTimes()) {
+                return null;
+            }
+            page.addTargetRequest(request.setPriority(0).putExtra(Request.CYCLE_TRIED_TIMES, cycleTriedTimes));
+        }
+        page.setNeedCycleRetry(true);
+        return page;
+    }
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;判断重试逻辑：先判断CYCLE_TRIED_TIMES是否为null，如果不为null，循环重试次数+1,判断是否超过最大允许值(默认为3次)，然后设置needCycleRetry标志说明需要被重试。这在我们Spider分析篇提到过这个，我们再来看看Spider中的代码片段加深理解&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;// for cycle retry
+        if (page.isNeedCycleRetry()) {
+            extractAndAddRequests(page, true);
+            sleep(site.getRetrySleepTime());
+            return;
+        }
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;2、HttpClientDownloader&lt;br&gt;
+继承了AbstractDownloader.负责通过HttpClient下载页面.&lt;br&gt;
+实例变量&lt;br&gt;
+httpClients：是一个Map型的变量，用来保存根据站点域名生成的HttpClient实例，以便重用。&lt;/p&gt;
+&lt;p&gt;httpClientGenerator：HttpClientGenerator实例，用来生成HttpClient&lt;/p&gt;
+&lt;p&gt;主要方法：&lt;br&gt;
+a、获取HttpClient实例。&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;private CloseableHttpClient getHttpClient(Site site, Proxy proxy) {
+        if (site == null) {
+            return httpClientGenerator.getClient(null, proxy);
+        }
+        String domain = site.getDomain();
+        CloseableHttpClient httpClient = httpClients.get(domain);
+        if (httpClient == null) {
+            synchronized (this) {
+                httpClient = httpClients.get(domain);
+                if (httpClient == null) {
+                    httpClient = httpClientGenerator.getClient(site, proxy);
+                    httpClients.put(domain, httpClient);
+                }
+            }
+        }
+        return httpClient;
+    }
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;主要思路是，通过Site获取域名，然后通过域名判断是否在httpClients这个map中已存在HttpClient实例，如果存在则重用，否则通过httpClientGenerator创建一个新的实例，然后加入到httpClients这个map中，并返回。&lt;br&gt;
+注意为了确保线程安全性，这里用到了线程安全的双重判断机制。&lt;/p&gt;
+&lt;p&gt;b、download方法：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;public Page download(Request request, Task task) {
+    Site site = null;
+    if (task != null) {
+        site = task.getSite();
+    }
+    Set&amp;lt;Integer&amp;gt; acceptStatCode;
+    String charset = null;
+    Map&amp;lt;String, String&amp;gt; headers = null;
+    if (site != null) {
+        acceptStatCode = site.getAcceptStatCode();
+        charset = site.getCharset();
+        headers = site.getHeaders();
+    } else {
+        acceptStatCode = WMCollections.newHashSet(200);
+    }
+    logger.info(&amp;quot;downloading page {}&amp;quot;, request.getUrl());
+    CloseableHttpResponse httpResponse = null;
+    int statusCode=0;
+    try {
+        HttpHost proxyHost = null;
+        Proxy proxy = null; //TODO
+        if (site.getHttpProxyPool() != null &amp;amp;&amp;amp; site.getHttpProxyPool().isEnable()) {
+            proxy = site.getHttpProxyFromPool();
+            proxyHost = proxy.getHttpHost();
+        } else if(site.getHttpProxy()!= null){
+            proxyHost = site.getHttpProxy();
+        }
+        
+        HttpUriRequest httpUriRequest = getHttpUriRequest(request, site, headers, proxyHost);
+        httpResponse = getHttpClient(site, proxy).execute(httpUriRequest);
+        statusCode = httpResponse.getStatusLine().getStatusCode();
+        request.putExtra(Request.STATUS_CODE, statusCode);
+        if (statusAccept(acceptStatCode, statusCode)) {
+            Page page = handleResponse(request, charset, httpResponse, task);
+            onSuccess(request);
+            return page;
+        } else {
+            logger.warn(&amp;quot;get page {} error, status code {} &amp;quot;,request.getUrl(),statusCode);
+            return null;
+        }
+    } catch (IOException e) {
+        logger.warn(&amp;quot;download page {} error&amp;quot;, request.getUrl(), e);
+        if (site.getCycleRetryTimes() &amp;gt; 0) {
+            return addToCycleRetry(request, site);
+        }
+        onError(request);
+        return null;
+    } finally {
+        request.putExtra(Request.STATUS_CODE, statusCode);
+        if (site.getHttpProxyPool()!=null &amp;amp;&amp;amp; site.getHttpProxyPool().isEnable()) {
+            site.returnHttpProxyToPool((HttpHost) request.getExtra(Request.PROXY), (Integer) request
+                    .getExtra(Request.STATUS_CODE));
+        }
+        try {
+            if (httpResponse != null) {
+                //ensure the connection is released back to pool
+                EntityUtils.consume(httpResponse.getEntity());
+            }
+        } catch (IOException e) {
+            logger.warn(&amp;quot;close response fail&amp;quot;, e);
+        }
+    }
+}
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;注意，这里的Task入参，其实就是Spider实例。&lt;br&gt;
+首先通过site来设置字符集、请求头、以及允许接收的响应状态码。&lt;br&gt;
+之后便是设置代理：首先判断site是否有设置代理池，以及代理池是否可用。可用，则随机从池中获取一个代理主机，否则判断site是否设置过直接代理主机。&lt;br&gt;
+然后获取HttpUriRequest(它是HttpGet、HttpPost的接口)，执行请求、判断响应码，并将响应转换成Page对象返回。期间还调用了状态方法onSuccess,onError，但是这两个方法都是空实现。(主要原因可能是在Spider中已经通过调用Listener来处理状态了)。&lt;br&gt;
+如果发生异常，调用addToCycleRetry判断是否需要进行重试。&lt;br&gt;
+如果这里返回的Page为null，在Spider中就不会调用PageProcessor，所以我们在PageProcessor中不用担心Page是否为null&lt;br&gt;
+最后的finally块中进行资源回收处理，回收代理入池，回收HttpClient的connection等(EntityUtils.consume(httpResponse.getEntity());)。&lt;/p&gt;
+&lt;p&gt;c、具体说说怎么获取HttpUriRequest&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;protected HttpUriRequest getHttpUriRequest(Request request, Site site, Map&amp;lt;String, String&amp;gt; headers,HttpHost proxy) {
+        RequestBuilder requestBuilder = selectRequestMethod(request).setUri(request.getUrl());
+        if (headers != null) {
+            for (Map.Entry&amp;lt;String, String&amp;gt; headerEntry : headers.entrySet()) {
+                requestBuilder.addHeader(headerEntry.getKey(), headerEntry.getValue());
+            }
+        }
+        RequestConfig.Builder requestConfigBuilder = RequestConfig.custom()
+                .setConnectionRequestTimeout(site.getTimeOut())
+                .setSocketTimeout(site.getTimeOut())
+                .setConnectTimeout(site.getTimeOut())
+                .setCookieSpec(CookieSpecs.BEST_MATCH);
+        if (proxy !=null) {
+            requestConfigBuilder.setProxy(proxy);
+            request.putExtra(Request.PROXY, proxy);
+        }
+        requestBuilder.setConfig(requestConfigBuilder.build());
+        return requestBuilder.build();
+    }
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;首先调用selectRequestMethod来获取合适的RequestBuilder，比如是GET还是POST，同时设置请求参数。之后便是调用HttpClient的相关API设置请求头、超时时间、代理等。&lt;/p&gt;
+&lt;p&gt;关于selectRequestMethod的改动：预计在WebMagic0.6.2(目前还未发布)之后由于作者合并并修改了PR，设置POST请求参数会大大简化。&lt;br&gt;
+之前POST请求设置参数需要&lt;br&gt;
+request.putExtra(&amp;ldquo;nameValuePair&amp;rdquo;,NameValuePair[]);然后这个NameValuePair[]需要不断add BasicNameValuePair,而且还需要UrlEncodedFormEntity,设置参数过程比较繁琐，整个过程如下：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;List&amp;lt;NameValuePair&amp;gt; formparams = new ArrayList&amp;lt;NameValuePair&amp;gt;();
+formparams.add(new BasicNameValuePair(&amp;quot;channelCode&amp;quot;, &amp;quot;0008&amp;quot;)); 
+formparams.add(new BasicNameValuePair(&amp;quot;pageIndex&amp;quot;, i+&amp;quot;&amp;quot;));
+formparams.add(new BasicNameValuePair(&amp;quot;pageSize&amp;quot;, &amp;quot;15&amp;quot;));
+formparams.add(new BasicNameValuePair(&amp;quot;sitewebName&amp;quot;, &amp;quot;广东省&amp;quot;));
+request.putExtra(&amp;quot;nameValuePair&amp;quot;,formparams.toArray());
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;之后我们只需要如下就可以了：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;request.putParam(&amp;quot;sitewebName&amp;quot;, &amp;quot;广东省&amp;quot;);
+request.putParam(&amp;quot;xxx&amp;quot;, &amp;quot;xxx&amp;quot;);
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;d、说说下载的内容如何转换为Page对象：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;protected Page handleResponse(Request request, String charset, HttpResponse httpResponse, Task task) throws IOException {
+        String content = getContent(charset, httpResponse);
+        Page page = new Page();
+        page.setRawText(content);
+        page.setUrl(new PlainText(request.getUrl()));
+        page.setRequest(request);
+        page.setStatusCode(httpResponse.getStatusLine().getStatusCode());
+        return page;
+    }
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;这个方法没什么好说的，唯一要说的就是它调用getContent方法。&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;protected String getContent(String charset, HttpResponse httpResponse) throws IOException {
+    if (charset == null) {
+        byte[] contentBytes = IOUtils.toByteArray(httpResponse.getEntity().getContent());
+        String htmlCharset = getHtmlCharset(httpResponse, contentBytes);
+        if (htmlCharset != null) {
+            return new String(contentBytes, htmlCharset);
+        } else {
+            logger.warn(&amp;quot;Charset autodetect failed, use {} as charset. Please specify charset in Site.setCharset()&amp;quot;, Charset.defaultCharset());
+            return new String(contentBytes);
+        }
+    } else {
+        return IOUtils.toString(httpResponse.getEntity().getContent(), charset);
+    }
+}
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;getContent方法，首先判断是否有charset(这是在Site中配置的)，如果有，直接调用ApacheCommons的IOUtils将相应内容转化成对应编码字符串，否则智能检测响应内容的字符编码。&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;protected String getHtmlCharset(HttpResponse httpResponse, byte[] contentBytes) throws IOException {
+    return CharsetUtils.detectCharset(httpResponse.getEntity().getContentType().getValue(), contentBytes);
+}
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;getHtmlCharset是调用CharsetUtils来检测字符编码，其思路就是，首先判断httpResponse.getEntity().getContentType().getValue()是否含有比如charset=utf-8&lt;br&gt;
+否则用Jsoup解析内容，判断是提取meta标签，然后判断针对html4中html4.01 &lt;meta http-equiv=&#34;Content-Type&#34; content=&#34;text/html; charset=UTF-8&#34; /&gt;和html5中&lt;meta charset=&#34;UTF-8&#34; /&gt;分情况判断出字符编码。&lt;br&gt;
+当然，你懂的，如果服务端返回的不是完整的html内容(不包含head的)，甚至不是html内容(比如json)，那么就会导致判断失败，返回默认jvm编码值.&lt;br&gt;
+所以说，如果可以，最好手动给Site设置字符编码。&lt;/p&gt;
+&lt;p&gt;3、HttpClientGenerator&lt;br&gt;
+用于生成HttpClient实例，算是一种工厂模式了。&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;public HttpClientGenerator() {
+        Registry&amp;lt;ConnectionSocketFactory&amp;gt; reg = RegistryBuilder.&amp;lt;ConnectionSocketFactory&amp;gt;create()
+                .register(&amp;quot;http&amp;quot;, PlainConnectionSocketFactory.INSTANCE)
+                .register(&amp;quot;https&amp;quot;, buildSSLConnectionSocketFactory())
+                .build();
+        connectionManager = new PoolingHttpClientConnectionManager(reg);
+        connectionManager.setDefaultMaxPerRoute(100);
+    }
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;构造函数主要是注册http以及https的socket工厂实例。https下我们需要提供自定义的工厂以忽略不可信证书校验(也就是信任所有证书)，在webmagic0.6之前是存在不可信证书校验失败这一问题的，之后webmagic合并了一个关于这一问题的PR，目前的策略是忽略证书校验、信任一切证书(这才是爬虫该采用的嘛，我们爬的不是安全，是寂寞。)&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;private CloseableHttpClient generateClient(Site site, Proxy proxy) {
+    CredentialsProvider credsProvider = null;
+    HttpClientBuilder httpClientBuilder = HttpClients.custom();
+    
+    if(proxy!=null &amp;amp;&amp;amp; StringUtils.isNotBlank(proxy.getUser()) &amp;amp;&amp;amp; StringUtils.isNotBlank(proxy.getPassword()))
+    {
+        credsProvider= new BasicCredentialsProvider();
+        credsProvider.setCredentials(
+                new AuthScope(proxy.getHttpHost().getAddress().getHostAddress(), proxy.getHttpHost().getPort()),
+                new UsernamePasswordCredentials(proxy.getUser(), proxy.getPassword()));
+        httpClientBuilder.setDefaultCredentialsProvider(credsProvider);
+    }
+
+    if(site!=null&amp;amp;&amp;amp;site.getHttpProxy()!=null&amp;amp;&amp;amp;site.getUsernamePasswordCredentials()!=null){
+        credsProvider = new BasicCredentialsProvider();
+        credsProvider.setCredentials(
+                new AuthScope(site.getHttpProxy()),//可以访问的范围
+                site.getUsernamePasswordCredentials());//用户名和密码
+        httpClientBuilder.setDefaultCredentialsProvider(credsProvider);
+    }
+    
+    httpClientBuilder.setConnectionManager(connectionManager);
+    if (site != null &amp;amp;&amp;amp; site.getUserAgent() != null) {
+        httpClientBuilder.setUserAgent(site.getUserAgent());
+    } else {
+        httpClientBuilder.setUserAgent(&amp;quot;&amp;quot;);
+    }
+    if (site == null || site.isUseGzip()) {
+        httpClientBuilder.addInterceptorFirst(new HttpRequestInterceptor() {
+
+            public void process(
+                    final HttpRequest request,
+                    final HttpContext context) throws HttpException, IOException {
+                if (!request.containsHeader(&amp;quot;Accept-Encoding&amp;quot;)) {
+                    request.addHeader(&amp;quot;Accept-Encoding&amp;quot;, &amp;quot;gzip&amp;quot;);
+                }
+            }
+        });
+    }
+    //解决post/redirect/post 302跳转问题
+    httpClientBuilder.setRedirectStrategy(new CustomRedirectStrategy());
+    
+    SocketConfig socketConfig = SocketConfig.custom().setSoTimeout(site.getTimeOut()).setSoKeepAlive(true).setTcpNoDelay(true).build();
+    httpClientBuilder.setDefaultSocketConfig(socketConfig);
+    connectionManager.setDefaultSocketConfig(socketConfig);
+    if (site != null) {
+        httpClientBuilder.setRetryHandler(new DefaultHttpRequestRetryHandler(site.getRetryTimes(), true));
+    }
+    generateCookie(httpClientBuilder, site);
+    return httpClientBuilder.build();
+}
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;前面是设置代理代理及代理的用户名密码&lt;br&gt;
+这里主要需要关注的两点是&lt;br&gt;
+1、post/redirect/post 302跳转问题：这是是通过设置一个自定义的跳转策略类来实现的。(这在0.6版本之前是存在问题的，0.6版本之后合并了PR)&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;httpClientBuilder.setRedirectStrategy(new CustomRedirectStrategy());
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;CustomRedirectStrategy在继承HttpClient自带额LaxRedirectStrategy(支持GET,POST，HEAD，DELETE请求重定向跳转)的基础上，对POST请求做了特殊化处理，如果是POST请求，代码处理如下：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;HttpRequestWrapper httpRequestWrapper = (HttpRequestWrapper) request;
+httpRequestWrapper.setURI(uri);
+httpRequestWrapper.removeHeaders(&amp;quot;Content-Length&amp;quot;);
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;可以看到，POST请求时首先会重用原先的request对象，并重新设置uri为新的重定向url，然后移除新请求不需要的头部。重用request对象的好处是，post/redirect/post 302跳转时会携带原有的POST参数，就防止了参数丢失的问题。&lt;br&gt;
+否则默认实现是这样的&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;if (status == HttpStatus.SC_TEMPORARY_REDIRECT) {
+                return RequestBuilder.copy(request).setUri(uri).build();
+            } else {
+                return new HttpGet(uri);
+            }
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;SC_TEMPORARY_REDIRECT是307状态码，也就是说只有在307状态码的时候才会携带参数跳转。&lt;/p&gt;
+&lt;p&gt;2、HttpClient的重试： 这是是通过设置一个默认处理器来实现的，同时设置了重试次数(也就是Site中配置的retryTimes)。&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;httpClientBuilder.setRetryHandler(newDefaultHttpRequestRetryHandler(site.getRetryTimes(), true));
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;之后便是配置Cookie策略。&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;private void generateCookie(HttpClientBuilder httpClientBuilder, Site site) {
+    CookieStore cookieStore = new BasicCookieStore();
+    for (Map.Entry&amp;lt;String, String&amp;gt; cookieEntry : site.getCookies().entrySet()) {
+        BasicClientCookie cookie = new BasicClientCookie(cookieEntry.getKey(), cookieEntry.getValue());
+        cookie.setDomain(site.getDomain());
+        cookieStore.addCookie(cookie);
+    }
+    for (Map.Entry&amp;lt;String, Map&amp;lt;String, String&amp;gt;&amp;gt; domainEntry : site.getAllCookies().entrySet()) {
+        for (Map.Entry&amp;lt;String, String&amp;gt; cookieEntry : domainEntry.getValue().entrySet()) {
+            BasicClientCookie cookie = new BasicClientCookie(cookieEntry.getKey(), cookieEntry.getValue());
+            cookie.setDomain(domainEntry.getKey());
+            cookieStore.addCookie(cookie);
+        }
+    }
+    httpClientBuilder.setDefaultCookieStore(cookieStore);
+}
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;首先创建一个CookieStore实例，然后将Site中的cookie加入到cookieStore中。并配置到httpClientBuilder中。那么在这个HttpClient实例执行的所有请求中都会用到这个cookieStore。比如登录保持就可以通过配置Site中的Cookie来实现。&lt;/p&gt;
+&lt;p&gt;4、关于Page对象说明：&lt;br&gt;
+Page对象代表了一个请求结果，或者说相当于页面(当返回json时这种说法有点勉强)。&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;public Html getHtml() {
+        if (html == null) {
+            html = new Html(UrlUtils.fixAllRelativeHrefs(rawText, request.getUrl()));
+        }
+        return html;
+    }
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;通过它得到的页面，原始页面中的链接是不包含域名的情况下会被自动转换为http[s]开头的完整链接。&lt;/p&gt;
+&lt;p&gt;关于Downloader就分析到这，后续会进行补充，下篇主题待定。&lt;/p&gt;
+</description>
+                
+                
+                
+                
+                
+                    
+                        
+                    
+                        
+                    
+                
+            </item>
+        
+            <item>
+                <title>爬虫框架WebMagic源码分析之Scheduler</title>
+                <link>https://jun33.top/posts/%E7%88%AC%E8%99%AB%E6%A1%86%E6%9E%B6webmagic%E6%BA%90%E7%A0%81%E5%88%86%E6%9E%90%E4%B9%8Bscheduler/</link>
+                <guid isPermaLink="true">https://jun33.top/posts/%E7%88%AC%E8%99%AB%E6%A1%86%E6%9E%B6webmagic%E6%BA%90%E7%A0%81%E5%88%86%E6%9E%90%E4%B9%8Bscheduler/</guid>
+                <pubDate>Tue, 04 Aug 2020 23:53:33 &#43;0800</pubDate>
+                
+                    <author>reuixiy@gmail.com (reuixiy)</author>
+                
+                <copyright>[CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/deed.en)</copyright>
+                
+                    <description>&lt;h1 id=&#34;爬虫框架webmagic源码分析之scheduler&#34;&gt;爬虫框架WebMagic源码分析之Scheduler&lt;/h1&gt;
+&lt;p&gt;Scheduler是Webmagic中的url调度器，负责从Spider处理收集(push)需要抓取的url(Page的targetRequests)、并poll出将要被处理的url给Spider，同时还负责对url判断是否进行错误重试、及去重处理、以及总页面数、剩余页面数统计等。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;主要接口：&lt;/strong&gt;&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;
+&lt;p&gt;Scheduler，定义了基本的push和poll方法。基本接口。&lt;/p&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;MonitorableScheduler，继承自Scheduler的接口，定义了获取剩余url请求数和总请求数的方法。便于监控。&lt;/p&gt;
+&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;&lt;strong&gt;core包主要实现类：&lt;/strong&gt;&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;
+&lt;p&gt;DuplicateRemovedScheduler，这是一个抽象类，实现了通用的push模板方法，并在push方法内部判断错误重试、去重处理等。去重策略采用的是HashSetDuplicateRemover类，这个会在稍后说明。&lt;/p&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;PriorityScheduler，内置两个优先级队列(+,-)和一个非优先级阻塞队列的调度器。&lt;/p&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;QueueScheduler，内置一个阻塞队列的调度器。这是默认采用的。&lt;/p&gt;
+&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;&lt;strong&gt;URL去重策略：&lt;/strong&gt;&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;
+&lt;p&gt;DuplicateRemover：去重接口，含有判断是否重复，重置重复检查，获取请求总数的方法。&lt;/p&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;HashSetDuplicateRemover：DuplicateRemover的实现类，内部维护了一个并发安全的HashSet。&lt;/p&gt;
+&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;先说下去重策略的具体实现。核心代码如下：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;public class HashSetDuplicateRemover implements DuplicateRemover {
+    private Set&amp;lt;String&amp;gt; urls = Collections.newSetFromMap(new ConcurrentHashMap&amp;lt;String, Boolean&amp;gt;());
+    @Override
+    public boolean isDuplicate(Request request, Task task) {
+        return !urls.add(getUrl(request));
+    }
+    。。。
+    @Override
+    public void resetDuplicateCheck(Task task) {
+        urls.clear();
+    }
+    @Override
+    public int getTotalRequestsCount(Task task) {
+        return urls.size();
+    }
+}
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;去重策略类很简单，就是维护一个并发安全的HashSet。然后通过add方法是否成功来判断是否是重复的url。重置重复检查就是清空set，获取请求总数也就是获取set的size。简单明了。但是你以为去重就这么点，那么你错了。继续看。&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;public abstract class DuplicateRemovedScheduler implements Scheduler {
+    private DuplicateRemover duplicatedRemover = new HashSetDuplicateRemover();
+    @Override
+    public void push(Request request, Task task) {
+        if (shouldReserved(request) || noNeedToRemoveDuplicate(request) || !duplicatedRemover.isDuplicate(request, task)) {
+            pushWhenNoDuplicate(request, task);
+        }
+    }
+    protected boolean shouldReserved(Request request) {
+        return request.getExtra(Request.CYCLE_TRIED_TIMES) != null;
+    }
+
+    protected boolean noNeedToRemoveDuplicate(Request request) {
+        return HttpConstant.Method.POST.equalsIgnoreCase(request.getMethod());
+    }
+    protected void pushWhenNoDuplicate(Request request, Task task) {
+
+    }
+}
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;DuplicateRemovedScheduler是一个抽象类，提供了push的通用模板，并为子类提供了pushWhenNoDuplicate用于实现自己的策略。push方法用于同一处理去重和重试机制。&lt;br&gt;
+首先判断是否需要进行错误重试，如果需要，那么就直接push到队列中，否则判断请求是否为POST方法，如果是直接加入队列，(这里需要注意的是，POST请求的url不会被加入HashSetDuplicateRemover维护的urls集合，故而也不会被加入到最终的getTotalRequestsCount的统计中，&lt;strong&gt;所以最终我们获取的统计信息只是针对GET请求的&lt;/strong&gt;。),否则进行去重判断。&lt;br&gt;
+根据不同调度器的实现，pushWhenNoDuplicate的实现方式不一样。&lt;br&gt;
+在PriorityScheduler中内置两个优先级队列(+,-)和一个非优先级阻塞队列的调度器，其pushWhenNoDuplicate代码如下：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;public void pushWhenNoDuplicate(Request request, Task task) {
+    if (request.getPriority() == 0) {
+        noPriorityQueue.add(request);
+    } else if (request.getPriority() &amp;gt; 0) {
+        priorityQueuePlus.put(request);
+    } else {
+        priorityQueueMinus.put(request);
+    }
+}
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;根据Request是否设置priority属性，以及是否为正、负来决定加入到哪个队列中。因为这影响了后续poll的先后顺序。&lt;/p&gt;
+&lt;p&gt;在QueueScheduler中内置一个阻塞队列的调度器。其pushWhenNoDuplicate代码如下：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;    public void pushWhenNoDuplicate(Request request, Task task) {
+        queue.add(request);
+    }
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;就是简单地将其加入队列中。&lt;/p&gt;
+&lt;p&gt;以上就是关于URL去重及push的机制，接下来说明poll思路：&lt;/p&gt;
+&lt;p&gt;在PriorityScheduler中，poll顺序为plus队列&amp;gt;noPriority队列&amp;gt;minus队列。&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;public synchronized Request poll(Task task) {
+        Request poll = priorityQueuePlus.poll();
+        if (poll != null) {
+            return poll;
+        }
+        poll = noPriorityQueue.poll();
+        if (poll != null) {
+            return poll;
+        }
+        return priorityQueueMinus.poll();
+    }
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;在QueueScheduler中，简单粗暴。&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;public Request poll(Task task) {
+        return queue.poll();
+    }
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;至于url请求总数统计，就是返回HashSetDuplicateRemover中维护的urls set的大小。这里再次罗嗦一次：最终我们获取的统计信息只是针对GET请求的。&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;public int getTotalRequestsCount(Task task) {
+        return getDuplicateRemover().getTotalRequestsCount(task);
+    }
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;当然extensions扩展模块中还有些Scheduler实现，比如RedisScheduler用作集群支持，FileCacheQueueScheduler用来断点续爬支持等。由于本系列文章是先分析核心包，后续分析扩展包，所以关于这部分，后续补充。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;RedisScheduler&lt;/strong&gt;&lt;br&gt;
+思路是采用set来存储已经抓取过的url，list来存储待抓url队列，hash来存储序列化数据(哈希中的键为url的SHA值，值为Request的json序列化字符串)。所有数据类型的键都是基于Spider的UUID来生成的，也就是说每个Spider实例所拥有的都是不同的。&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt; @Override
+    public boolean isDuplicate(Request request, Task task) {
+        Jedis jedis = pool.getResource();
+        try {
+            return jedis.sadd(getSetKey(task), request.getUrl()) &amp;gt; 0;
+        } finally {
+            pool.returnResource(jedis);
+        }
+
+    }
+
+    @Override
+    protected void pushWhenNoDuplicate(Request request, Task task) {
+        Jedis jedis = pool.getResource();
+        try {
+            jedis.rpush(getQueueKey(task), request.getUrl());
+            if (request.getExtras() != null) {
+                String field = DigestUtils.shaHex(request.getUrl());
+                String value = JSON.toJSONString(request);
+                jedis.hset((ITEM_PREFIX + task.getUUID()), field, value);
+            }
+        } finally {
+            pool.returnResource(jedis);
+        }
+    }
+
+    @Override
+    public synchronized Request poll(Task task) {
+        Jedis jedis = pool.getResource();
+        try {
+            String url = jedis.lpop(getQueueKey(task));
+            if (url == null) {
+                return null;
+            }
+            String key = ITEM_PREFIX + task.getUUID();
+            String field = DigestUtils.shaHex(url);
+            byte[] bytes = jedis.hget(key.getBytes(), field.getBytes());
+            if (bytes != null) {
+                Request o = JSON.parseObject(new String(bytes), Request.class);
+                return o;
+            }
+                Request request = new Request(url);
+            return request;
+        } finally {
+            pool.returnResource(jedis);
+        }
+    }
+
+ @Override
+    public int getLeftRequestsCount(Task task) {
+        Jedis jedis = pool.getResource();
+        try {
+            Long size = jedis.llen(getQueueKey(task));
+            return size.intValue();
+        } finally {
+            pool.returnResource(jedis);
+        }
+    }
+
+    @Override
+    public int getTotalRequestsCount(Task task) {
+        Jedis jedis = pool.getResource();
+        try {
+            Long size = jedis.scard(getSetKey(task));
+            return size.intValue();
+        } finally {
+            pool.returnResource(jedis);
+        }
+    }
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;这些代码都很好理解，只要有点redis基础的都没问题，这里就不再赘述了。&lt;/p&gt;
+&lt;p&gt;至于RedisPriorityScheduler就是采用有序的zset来存储plus、min队列，list来存储noprioprity队列。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;FileCacheQueueScheduler&lt;/strong&gt;&lt;br&gt;
+思路是维护两个文件.cursor.txt,.urls.txt 前者由于存储一个数字，这个数字代表了读取.urls.txt的行数。后者用来存储所有的urls。初始化时从两个文件读取内存中，并初始化urls集和queue队列、同时初始化flush线程定时flush内容到文件中。当poll和pushWhenNoDuplicate时和原来逻辑差不多，只不过加了写文件的步骤。&lt;br&gt;
+需要注意的是：FileCacheQueueScheduler实现了自己的去重规则，而不是直接使用DuplicateRemovedScheduler父类的去重规则。不过原理都一样，都是通过Set来去重。&lt;/p&gt;
+&lt;p&gt;以上就是关于调度器的部分，下篇主题待定。&lt;/p&gt;
+</description>
+                
+                
+                
+                
+                
+                    
+                        
+                    
+                        
+                    
+                
+            </item>
+        
+            <item>
+                <title>测试脚本</title>
+                <link>https://jun33.top/posts/%E6%B5%8B%E8%AF%95%E8%84%9A%E6%9C%AC/</link>
+                <guid isPermaLink="true">https://jun33.top/posts/%E6%B5%8B%E8%AF%95%E8%84%9A%E6%9C%AC/</guid>
+                <pubDate>Sun, 02 Aug 2020 15:04:53 &#43;0800</pubDate>
+                
+                    <author>reuixiy@gmail.com (reuixiy)</author>
+                
+                <copyright>[CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/deed.en)</copyright>
+                
+                    <description>&lt;h1 id=&#34;爬虫框架webmagic源码分析之spider&#34;&gt;爬虫框架Webmagic源码分析之Spider&lt;/h1&gt;
+&lt;p&gt;本系列文章，针对Webmagic 0.6.1版本&lt;/p&gt;
+&lt;p&gt;一个普通爬虫启动代码&lt;/p&gt;
+&lt;div class=&#34;highlight&#34;&gt;&lt;div class=&#34;chroma&#34;&gt;
+&lt;table class=&#34;lntable&#34;&gt;&lt;tr&gt;&lt;td class=&#34;lntd&#34;&gt;
+&lt;pre class=&#34;chroma&#34;&gt;&lt;code&gt;&lt;span class=&#34;lnt&#34;&gt; 1
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt; 2
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt; 3
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt; 4
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt; 5
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt; 6
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt; 7
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt; 8
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt; 9
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt;10
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt;11
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt;12
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt;13
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class=&#34;lntd&#34;&gt;
+&lt;pre class=&#34;chroma&#34;&gt;&lt;code class=&#34;language-java&#34; data-lang=&#34;java&#34;&gt;&lt;span class=&#34;kd&#34;&gt;public&lt;/span&gt; &lt;span class=&#34;kd&#34;&gt;static&lt;/span&gt; &lt;span class=&#34;kt&#34;&gt;void&lt;/span&gt; &lt;span class=&#34;nf&#34;&gt;main&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;(&lt;/span&gt;&lt;span class=&#34;n&#34;&gt;String&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;[]&lt;/span&gt; &lt;span class=&#34;n&#34;&gt;args&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;)&lt;/span&gt; &lt;span class=&#34;o&#34;&gt;{&lt;/span&gt;
+    &lt;span class=&#34;n&#34;&gt;Spider&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;.&lt;/span&gt;&lt;span class=&#34;na&#34;&gt;create&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;(&lt;/span&gt;&lt;span class=&#34;k&#34;&gt;new&lt;/span&gt; &lt;span class=&#34;n&#34;&gt;GithubRepoPageProcessor&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;())&lt;/span&gt;
+            &lt;span class=&#34;n&#34;&gt;从https&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;:&lt;/span&gt;&lt;span class=&#34;n&#34;&gt;github&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;.&lt;/span&gt;&lt;span class=&#34;na&#34;&gt;com&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;/&lt;/span&gt;&lt;span class=&#34;n&#34;&gt;code4craft开始抓&lt;/span&gt;    
+            &lt;span class=&#34;o&#34;&gt;.&lt;/span&gt;&lt;span class=&#34;na&#34;&gt;addUrl&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;(&lt;/span&gt;&lt;span class=&#34;s&#34;&gt;&amp;#34;https://github.com/code4craft&amp;#34;&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;)&lt;/span&gt;
+            &lt;span class=&#34;c1&#34;&gt;//设置Scheduler，使用Redis来管理URL队列
+&lt;/span&gt;&lt;span class=&#34;c1&#34;&gt;&lt;/span&gt;            &lt;span class=&#34;o&#34;&gt;.&lt;/span&gt;&lt;span class=&#34;na&#34;&gt;setScheduler&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;(&lt;/span&gt;&lt;span class=&#34;k&#34;&gt;new&lt;/span&gt; &lt;span class=&#34;n&#34;&gt;RedisScheduler&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;(&lt;/span&gt;&lt;span class=&#34;s&#34;&gt;&amp;#34;localhost&amp;#34;&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;))&lt;/span&gt;
+            &lt;span class=&#34;c1&#34;&gt;//设置Pipeline，将结果以json方式保存到文件
+&lt;/span&gt;&lt;span class=&#34;c1&#34;&gt;&lt;/span&gt;            &lt;span class=&#34;o&#34;&gt;.&lt;/span&gt;&lt;span class=&#34;na&#34;&gt;addPipeline&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;(&lt;/span&gt;&lt;span class=&#34;k&#34;&gt;new&lt;/span&gt; &lt;span class=&#34;n&#34;&gt;JsonFilePipeline&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;(&lt;/span&gt;&lt;span class=&#34;s&#34;&gt;&amp;#34;D:\\data\\webmagic&amp;#34;&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;))&lt;/span&gt;
+            &lt;span class=&#34;c1&#34;&gt;//开启5个线程同时执行
+&lt;/span&gt;&lt;span class=&#34;c1&#34;&gt;&lt;/span&gt;            &lt;span class=&#34;o&#34;&gt;.&lt;/span&gt;&lt;span class=&#34;na&#34;&gt;thread&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;(&lt;/span&gt;&lt;span class=&#34;n&#34;&gt;5&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;)&lt;/span&gt;
+            &lt;span class=&#34;c1&#34;&gt;//启动爬虫
+&lt;/span&gt;&lt;span class=&#34;c1&#34;&gt;&lt;/span&gt;            &lt;span class=&#34;o&#34;&gt;.&lt;/span&gt;&lt;span class=&#34;na&#34;&gt;run&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;();&lt;/span&gt;
+&lt;span class=&#34;o&#34;&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;p&gt;&lt;img src=&#34;https://cdn.segmentfault.com/v-5f0a9217/global/img/squares.svg&#34; alt=&#34;10214101_11Dn.png&#34; title=&#34;10214101_11Dn.png&#34;&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;1、spider可配置插拔组件：&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;Downloader 提供自定义的Downloader，默认为HttpClientDownloader&lt;br&gt;
+Pipeline 提供自定义的Pipeline，可以配置多个，多个Pipeline链式处理结果。默认为ConsolePipeline&lt;br&gt;
+Scheduler 提供自定义的调度器，默认为QueueScheduler&lt;br&gt;
+PageProcessor 页面处理组件，开发者爬虫的实现&lt;br&gt;
+ExecutorService 可以用于提供自己实现的线程池来监控，默认为Fixed ExecutorService&lt;br&gt;
+SpiderListener 页面状态监听器，提供每个页面成功和错误的回调。可配置多个。&lt;/p&gt;
+&lt;p&gt;其中有：WebMagic四大组件：Pipeline，Scheduler，Downloader和PageProcesser 。这和Python中的Scrapy的理念是一致的。但是Scrapy还有一些中间件的概念，从结构图中便可以看出区别&lt;/p&gt;
+&lt;p&gt;&lt;img src=&#34;https://cdn.segmentfault.com/v-5f0a9217/global/img/squares.svg&#34; alt=&#34;scrapy_backbone.png&#34; title=&#34;scrapy_backbone.png&#34;&gt;&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;2、状态变量：&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;stat 0,初始化；1，运行中；2，已停止&lt;br&gt;
+pageCount 已经抓取的页面数。&lt;code&gt;注意：这里统计的是GET请求的页面，POST请求的页面不在统计的范围之内。具体原因见DuplicateRemovedScheduler类&lt;/code&gt;&lt;br&gt;
+startTime:开始时间，可用于计算耗时。&lt;br&gt;
+emptySleepTime 最大空闲等待时间，默认30s。如果抓取队列为空，且url队列为空的最大等待时长，超过该时间，就认为爬虫抓取完成，停止运行。&lt;br&gt;
+threadNum : 启用的线程数，默认1.&lt;br&gt;
+threadPool:这是Webmagic提供的CountableThreadPool实例，内部封装了ExecutorService，CountableThreadPool 提供了额外的获取线程运行数的方法，此外为防止大量urls入池等待，提供了阻塞方式管理urls入池。(后续细说)&lt;br&gt;
+destroyWhenExit：默认true。是否在调用stop()时立即停止所有任务并退出。&lt;br&gt;
+spawUrl : 默认为true，是否抓取除了入口页面starturls之外的其他页面(targetRequests).&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;3、需要配置的项：&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;Site 全局站点配置，如UA，timeout，sleep等&lt;br&gt;
+PageProcessor 页面处理组件，开发者爬虫的实现&lt;br&gt;
+Request 配置入口页面url，可以多个。&lt;br&gt;
+uuid ，可选，Spider的名字，用于分析和日志。&lt;/p&gt;
+&lt;p&gt;需要注意的是：每个修改配置的方法都进行了checkIfRunning检查，如果检查当前Spider正在运行，它会抛出IllegalStateException。&lt;/p&gt;
+&lt;p&gt;所有配置方法都return this,便于链式调用，类似于builder模式。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;4、运行方式：&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;Spider实现了Runnable接口(还有一个Webmagic自己的Task接口）。&lt;br&gt;
+run()，跟普通的Runnable一样，阻塞式运行，会阻塞当前线程直至Spider运行结束。&lt;br&gt;
+runAsync()，就是new一个Thread来运行当前Spider这个Runnable，异步运行。&lt;br&gt;
+start()，runAsync()的别名方法,异步运行。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;5、状态相关方法&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;stop()，结束当前爬虫的运行，内部只是简单地修改一下状态，如果设置了destroyWhenExit=true(默认就是true)那么会立即停止所有任务并清除资源，否则并不会停止正在线程池中运行的线程，也不会销毁线程池。&lt;/p&gt;
+&lt;p&gt;getThreadAlive() 获取正在运行的线程数，用于状态监控。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;6、核心代码分析&lt;/strong&gt;&lt;/p&gt;
+&lt;div class=&#34;highlight&#34;&gt;&lt;div class=&#34;chroma&#34;&gt;
+&lt;table class=&#34;lntable&#34;&gt;&lt;tr&gt;&lt;td class=&#34;lntd&#34;&gt;
+&lt;pre class=&#34;chroma&#34;&gt;&lt;code&gt;&lt;span class=&#34;lnt&#34;&gt; 1
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt; 2
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt; 3
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt; 4
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt; 5
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt; 6
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt; 7
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt; 8
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt; 9
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt;10
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt;11
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt;12
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt;13
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt;14
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt;15
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt;16
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt;17
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt;18
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt;19
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt;20
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt;21
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt;22
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt;23
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt;24
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt;25
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt;26
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt;27
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt;28
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt;29
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt;30
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt;31
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt;32
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt;33
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt;34
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt;35
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt;36
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class=&#34;lntd&#34;&gt;
+&lt;pre class=&#34;chroma&#34;&gt;&lt;code class=&#34;language-java&#34; data-lang=&#34;java&#34;&gt;&lt;span class=&#34;kd&#34;&gt;public&lt;/span&gt; &lt;span class=&#34;kt&#34;&gt;void&lt;/span&gt; &lt;span class=&#34;nf&#34;&gt;run&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;()&lt;/span&gt; &lt;span class=&#34;o&#34;&gt;{&lt;/span&gt;
+        &lt;span class=&#34;n&#34;&gt;checkRunningStat&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;();&lt;/span&gt;
+        &lt;span class=&#34;n&#34;&gt;initComponent&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;();&lt;/span&gt;
+        &lt;span class=&#34;n&#34;&gt;logger&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;.&lt;/span&gt;&lt;span class=&#34;na&#34;&gt;info&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;(&lt;/span&gt;&lt;span class=&#34;s&#34;&gt;&amp;#34;Spider &amp;#34;&lt;/span&gt; &lt;span class=&#34;o&#34;&gt;+&lt;/span&gt; &lt;span class=&#34;n&#34;&gt;getUUID&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;()&lt;/span&gt; &lt;span class=&#34;o&#34;&gt;+&lt;/span&gt; &lt;span class=&#34;s&#34;&gt;&amp;#34; started!&amp;#34;&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;);&lt;/span&gt;
+        &lt;span class=&#34;k&#34;&gt;while&lt;/span&gt; &lt;span class=&#34;o&#34;&gt;(!&lt;/span&gt;&lt;span class=&#34;n&#34;&gt;Thread&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;.&lt;/span&gt;&lt;span class=&#34;na&#34;&gt;currentThread&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;().&lt;/span&gt;&lt;span class=&#34;na&#34;&gt;isInterrupted&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;()&lt;/span&gt; &lt;span class=&#34;o&#34;&gt;&amp;amp;&amp;amp;&lt;/span&gt; &lt;span class=&#34;n&#34;&gt;stat&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;.&lt;/span&gt;&lt;span class=&#34;na&#34;&gt;get&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;()&lt;/span&gt; &lt;span class=&#34;o&#34;&gt;==&lt;/span&gt; &lt;span class=&#34;n&#34;&gt;STAT_RUNNING&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;)&lt;/span&gt; &lt;span class=&#34;o&#34;&gt;{&lt;/span&gt;
+            &lt;span class=&#34;kd&#34;&gt;final&lt;/span&gt; &lt;span class=&#34;n&#34;&gt;Request&lt;/span&gt; &lt;span class=&#34;n&#34;&gt;request&lt;/span&gt; &lt;span class=&#34;o&#34;&gt;=&lt;/span&gt; &lt;span class=&#34;n&#34;&gt;scheduler&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;.&lt;/span&gt;&lt;span class=&#34;na&#34;&gt;poll&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;(&lt;/span&gt;&lt;span class=&#34;k&#34;&gt;this&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;);&lt;/span&gt;
+            &lt;span class=&#34;k&#34;&gt;if&lt;/span&gt; &lt;span class=&#34;o&#34;&gt;(&lt;/span&gt;&lt;span class=&#34;n&#34;&gt;request&lt;/span&gt; &lt;span class=&#34;o&#34;&gt;==&lt;/span&gt; &lt;span class=&#34;kc&#34;&gt;null&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;)&lt;/span&gt; &lt;span class=&#34;o&#34;&gt;{&lt;/span&gt;
+                &lt;span class=&#34;k&#34;&gt;if&lt;/span&gt; &lt;span class=&#34;o&#34;&gt;(&lt;/span&gt;&lt;span class=&#34;n&#34;&gt;threadPool&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;.&lt;/span&gt;&lt;span class=&#34;na&#34;&gt;getThreadAlive&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;()&lt;/span&gt; &lt;span class=&#34;o&#34;&gt;==&lt;/span&gt; &lt;span class=&#34;n&#34;&gt;0&lt;/span&gt; &lt;span class=&#34;o&#34;&gt;&amp;amp;&amp;amp;&lt;/span&gt; &lt;span class=&#34;n&#34;&gt;exitWhenComplete&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;)&lt;/span&gt; &lt;span class=&#34;o&#34;&gt;{&lt;/span&gt;
+                    &lt;span class=&#34;k&#34;&gt;break&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;;&lt;/span&gt;
+                &lt;span class=&#34;o&#34;&gt;}&lt;/span&gt;
+                &lt;span class=&#34;c1&#34;&gt;// wait until new url added
+&lt;/span&gt;&lt;span class=&#34;c1&#34;&gt;&lt;/span&gt;                &lt;span class=&#34;n&#34;&gt;waitNewUrl&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;();&lt;/span&gt;
+            &lt;span class=&#34;o&#34;&gt;}&lt;/span&gt; &lt;span class=&#34;k&#34;&gt;else&lt;/span&gt; &lt;span class=&#34;o&#34;&gt;{&lt;/span&gt;
+                &lt;span class=&#34;n&#34;&gt;threadPool&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;.&lt;/span&gt;&lt;span class=&#34;na&#34;&gt;execute&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;(&lt;/span&gt;&lt;span class=&#34;k&#34;&gt;new&lt;/span&gt; &lt;span class=&#34;n&#34;&gt;Runnable&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;()&lt;/span&gt; &lt;span class=&#34;o&#34;&gt;{&lt;/span&gt;
+                    &lt;span class=&#34;nd&#34;&gt;@Override&lt;/span&gt;
+                    &lt;span class=&#34;kd&#34;&gt;public&lt;/span&gt; &lt;span class=&#34;kt&#34;&gt;void&lt;/span&gt; &lt;span class=&#34;nf&#34;&gt;run&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;()&lt;/span&gt; &lt;span class=&#34;o&#34;&gt;{&lt;/span&gt;
+                        &lt;span class=&#34;k&#34;&gt;try&lt;/span&gt; &lt;span class=&#34;o&#34;&gt;{&lt;/span&gt;
+                            &lt;span class=&#34;n&#34;&gt;processRequest&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;(&lt;/span&gt;&lt;span class=&#34;n&#34;&gt;request&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;);&lt;/span&gt;
+                            &lt;span class=&#34;n&#34;&gt;onSuccess&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;(&lt;/span&gt;&lt;span class=&#34;n&#34;&gt;request&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;);&lt;/span&gt;
+                        &lt;span class=&#34;o&#34;&gt;}&lt;/span&gt; &lt;span class=&#34;k&#34;&gt;catch&lt;/span&gt; &lt;span class=&#34;o&#34;&gt;(&lt;/span&gt;&lt;span class=&#34;n&#34;&gt;Exception&lt;/span&gt; &lt;span class=&#34;n&#34;&gt;e&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;)&lt;/span&gt; &lt;span class=&#34;o&#34;&gt;{&lt;/span&gt;
+                            &lt;span class=&#34;n&#34;&gt;onError&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;(&lt;/span&gt;&lt;span class=&#34;n&#34;&gt;request&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;);&lt;/span&gt;
+                            &lt;span class=&#34;n&#34;&gt;logger&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;.&lt;/span&gt;&lt;span class=&#34;na&#34;&gt;error&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;(&lt;/span&gt;&lt;span class=&#34;s&#34;&gt;&amp;#34;process request &amp;#34;&lt;/span&gt; &lt;span class=&#34;o&#34;&gt;+&lt;/span&gt; &lt;span class=&#34;n&#34;&gt;request&lt;/span&gt; &lt;span class=&#34;o&#34;&gt;+&lt;/span&gt; &lt;span class=&#34;s&#34;&gt;&amp;#34; error&amp;#34;&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;,&lt;/span&gt; &lt;span class=&#34;n&#34;&gt;e&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;);&lt;/span&gt;
+                        &lt;span class=&#34;o&#34;&gt;}&lt;/span&gt; &lt;span class=&#34;k&#34;&gt;finally&lt;/span&gt; &lt;span class=&#34;o&#34;&gt;{&lt;/span&gt;
+                            &lt;span class=&#34;n&#34;&gt;pageCount&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;.&lt;/span&gt;&lt;span class=&#34;na&#34;&gt;incrementAndGet&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;();&lt;/span&gt;
+                            &lt;span class=&#34;n&#34;&gt;signalNewUrl&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;();&lt;/span&gt;
+                        &lt;span class=&#34;o&#34;&gt;}&lt;/span&gt;
+                    &lt;span class=&#34;o&#34;&gt;}&lt;/span&gt;
+                &lt;span class=&#34;o&#34;&gt;});&lt;/span&gt;
+            &lt;span class=&#34;o&#34;&gt;}&lt;/span&gt;
+        &lt;span class=&#34;o&#34;&gt;}&lt;/span&gt;
+        &lt;span class=&#34;n&#34;&gt;stat&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;.&lt;/span&gt;&lt;span class=&#34;na&#34;&gt;set&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;(&lt;/span&gt;&lt;span class=&#34;n&#34;&gt;STAT_STOPPED&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;);&lt;/span&gt;
+        &lt;span class=&#34;c1&#34;&gt;// release some resources
+&lt;/span&gt;&lt;span class=&#34;c1&#34;&gt;&lt;/span&gt;        &lt;span class=&#34;k&#34;&gt;if&lt;/span&gt; &lt;span class=&#34;o&#34;&gt;(&lt;/span&gt;&lt;span class=&#34;n&#34;&gt;destroyWhenExit&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;)&lt;/span&gt; &lt;span class=&#34;o&#34;&gt;{&lt;/span&gt;
+            &lt;span class=&#34;n&#34;&gt;close&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;();&lt;/span&gt;
+        &lt;span class=&#34;o&#34;&gt;}&lt;/span&gt;
+    &lt;span class=&#34;o&#34;&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;p&gt;首先通过checkRunningStat()来检查并设置运行状态，如果已经在运行了，那么会抛出&lt;strong&gt;IllegalStateException&lt;/strong&gt;。之后初始化组件（主要是初始化Downloader、线程池、将starturls push到Scheduler中，初始化开始时间等）。之后进入循环，从scheduler中poll出Request给线程池去执行。如果scheduler中没有request了：继而判断是否有线程在运行和是否设置了立即退出标志，如果设置了立即退出循环，否则调用waitNewUrl()等待有新的url被加入。&lt;br&gt;
+waitNewUrl()采用RetreentLock和Condition来进行超时阻塞，一旦阻塞时间超过emptySleepTime就返回。如果线程池中运行线程数量为0，并且exitWhenComplete=true(默认)，那么就停止退出，结束爬虫。&lt;strong&gt;如果exitWhenComplete=false，那么需要开发者手动调用stop()来停止退出爬虫,并调用close()来清理资源。&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;通过processRequest来处理抓取url的整个流程，代码如下：&lt;/p&gt;
+&lt;div class=&#34;highlight&#34;&gt;&lt;div class=&#34;chroma&#34;&gt;
+&lt;table class=&#34;lntable&#34;&gt;&lt;tr&gt;&lt;td class=&#34;lntd&#34;&gt;
+&lt;pre class=&#34;chroma&#34;&gt;&lt;code&gt;&lt;span class=&#34;lnt&#34;&gt; 1
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt; 2
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt; 3
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt; 4
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt; 5
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt; 6
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt; 7
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt; 8
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt; 9
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt;10
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt;11
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt;12
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt;13
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt;14
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt;15
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt;16
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt;17
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt;18
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt;19
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt;20
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt;21
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt;22
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt;23
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt;24
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class=&#34;lntd&#34;&gt;
+&lt;pre class=&#34;chroma&#34;&gt;&lt;code class=&#34;language-java&#34; data-lang=&#34;java&#34;&gt;&lt;span class=&#34;kd&#34;&gt;protected&lt;/span&gt; &lt;span class=&#34;kt&#34;&gt;void&lt;/span&gt; &lt;span class=&#34;nf&#34;&gt;processRequest&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;(&lt;/span&gt;&lt;span class=&#34;n&#34;&gt;Request&lt;/span&gt; &lt;span class=&#34;n&#34;&gt;request&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;)&lt;/span&gt; &lt;span class=&#34;o&#34;&gt;{&lt;/span&gt;
+        &lt;span class=&#34;n&#34;&gt;Page&lt;/span&gt; &lt;span class=&#34;n&#34;&gt;page&lt;/span&gt; &lt;span class=&#34;o&#34;&gt;=&lt;/span&gt; &lt;span class=&#34;n&#34;&gt;downloader&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;.&lt;/span&gt;&lt;span class=&#34;na&#34;&gt;download&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;(&lt;/span&gt;&lt;span class=&#34;n&#34;&gt;request&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;,&lt;/span&gt; &lt;span class=&#34;k&#34;&gt;this&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;);&lt;/span&gt;
+        &lt;span class=&#34;k&#34;&gt;if&lt;/span&gt; &lt;span class=&#34;o&#34;&gt;(&lt;/span&gt;&lt;span class=&#34;n&#34;&gt;page&lt;/span&gt; &lt;span class=&#34;o&#34;&gt;==&lt;/span&gt; &lt;span class=&#34;kc&#34;&gt;null&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;)&lt;/span&gt; &lt;span class=&#34;o&#34;&gt;{&lt;/span&gt;
+            &lt;span class=&#34;n&#34;&gt;sleep&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;(&lt;/span&gt;&lt;span class=&#34;n&#34;&gt;site&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;.&lt;/span&gt;&lt;span class=&#34;na&#34;&gt;getSleepTime&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;());&lt;/span&gt;
+            &lt;span class=&#34;n&#34;&gt;onError&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;(&lt;/span&gt;&lt;span class=&#34;n&#34;&gt;request&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;);&lt;/span&gt;
+            &lt;span class=&#34;k&#34;&gt;return&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;;&lt;/span&gt;
+        &lt;span class=&#34;o&#34;&gt;}&lt;/span&gt;
+        &lt;span class=&#34;c1&#34;&gt;// for cycle retry
+&lt;/span&gt;&lt;span class=&#34;c1&#34;&gt;&lt;/span&gt;        &lt;span class=&#34;k&#34;&gt;if&lt;/span&gt; &lt;span class=&#34;o&#34;&gt;(&lt;/span&gt;&lt;span class=&#34;n&#34;&gt;page&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;.&lt;/span&gt;&lt;span class=&#34;na&#34;&gt;isNeedCycleRetry&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;())&lt;/span&gt; &lt;span class=&#34;o&#34;&gt;{&lt;/span&gt;
+            &lt;span class=&#34;n&#34;&gt;extractAndAddRequests&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;(&lt;/span&gt;&lt;span class=&#34;n&#34;&gt;page&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;,&lt;/span&gt; &lt;span class=&#34;kc&#34;&gt;true&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;);&lt;/span&gt;
+            &lt;span class=&#34;n&#34;&gt;sleep&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;(&lt;/span&gt;&lt;span class=&#34;n&#34;&gt;site&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;.&lt;/span&gt;&lt;span class=&#34;na&#34;&gt;getRetrySleepTime&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;());&lt;/span&gt;
+            &lt;span class=&#34;k&#34;&gt;return&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;;&lt;/span&gt;
+        &lt;span class=&#34;o&#34;&gt;}&lt;/span&gt;
+        &lt;span class=&#34;n&#34;&gt;pageProcessor&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;.&lt;/span&gt;&lt;span class=&#34;na&#34;&gt;process&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;(&lt;/span&gt;&lt;span class=&#34;n&#34;&gt;page&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;);&lt;/span&gt;
+        &lt;span class=&#34;n&#34;&gt;extractAndAddRequests&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;(&lt;/span&gt;&lt;span class=&#34;n&#34;&gt;page&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;,&lt;/span&gt; &lt;span class=&#34;n&#34;&gt;spawnUrl&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;);&lt;/span&gt;
+        &lt;span class=&#34;k&#34;&gt;if&lt;/span&gt; &lt;span class=&#34;o&#34;&gt;(!&lt;/span&gt;&lt;span class=&#34;n&#34;&gt;page&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;.&lt;/span&gt;&lt;span class=&#34;na&#34;&gt;getResultItems&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;().&lt;/span&gt;&lt;span class=&#34;na&#34;&gt;isSkip&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;())&lt;/span&gt; &lt;span class=&#34;o&#34;&gt;{&lt;/span&gt;
+            &lt;span class=&#34;k&#34;&gt;for&lt;/span&gt; &lt;span class=&#34;o&#34;&gt;(&lt;/span&gt;&lt;span class=&#34;n&#34;&gt;Pipeline&lt;/span&gt; &lt;span class=&#34;n&#34;&gt;pipeline&lt;/span&gt; &lt;span class=&#34;o&#34;&gt;:&lt;/span&gt; &lt;span class=&#34;n&#34;&gt;pipelines&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;)&lt;/span&gt; &lt;span class=&#34;o&#34;&gt;{&lt;/span&gt;
+                &lt;span class=&#34;n&#34;&gt;pipeline&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;.&lt;/span&gt;&lt;span class=&#34;na&#34;&gt;process&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;(&lt;/span&gt;&lt;span class=&#34;n&#34;&gt;page&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;.&lt;/span&gt;&lt;span class=&#34;na&#34;&gt;getResultItems&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;(),&lt;/span&gt; &lt;span class=&#34;k&#34;&gt;this&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;);&lt;/span&gt;
+            &lt;span class=&#34;o&#34;&gt;}&lt;/span&gt;
+        &lt;span class=&#34;o&#34;&gt;}&lt;/span&gt;
+        &lt;span class=&#34;c1&#34;&gt;//for proxy status management
+&lt;/span&gt;&lt;span class=&#34;c1&#34;&gt;&lt;/span&gt;        &lt;span class=&#34;n&#34;&gt;request&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;.&lt;/span&gt;&lt;span class=&#34;na&#34;&gt;putExtra&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;(&lt;/span&gt;&lt;span class=&#34;n&#34;&gt;Request&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;.&lt;/span&gt;&lt;span class=&#34;na&#34;&gt;STATUS_CODE&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;,&lt;/span&gt; &lt;span class=&#34;n&#34;&gt;page&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;.&lt;/span&gt;&lt;span class=&#34;na&#34;&gt;getStatusCode&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;());&lt;/span&gt;
+        &lt;span class=&#34;n&#34;&gt;sleep&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;(&lt;/span&gt;&lt;span class=&#34;n&#34;&gt;site&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;.&lt;/span&gt;&lt;span class=&#34;na&#34;&gt;getSleepTime&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;());&lt;/span&gt;
+    &lt;span class=&#34;o&#34;&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;p&gt;它在内部调用downloader下载页面得到Page(Page代表了一个页面)，然后判断是否需要重试(needCycleRetry标志会在downloader下载页面发生异常时被设置为true，同时会把自己本身request加到targetRequests当中)，如果需要，则抽取targetRequests到scheduler当中。如果都没问题，继续调用我们实现的页面处理器进行处理，之后再抽取我们在页面处理器中放入的&lt;strong&gt;targetRequests&lt;/strong&gt;(即需要继续抓取的url)到scheduler当中。之后便是调用pipeline进行处理(一般做持久化操作，写到数据库、文件之类的)，但是如果我们在页面处理器中为page设置了skip标志，那么就不会调用pipeline进行处理。&lt;br&gt;
+当然其中还包括一些重试休眠时间、继续抓取等待时间等来更好地控制爬虫抓取频率。&lt;/p&gt;
+&lt;p&gt;说完processRequest，我们回到run()继续分析，处理完之后，就是调用监听器，告诉其成功还是失败，最后抓取数加+1，然后通知新url被加入(通知waitNewUrl()可以返回继续了)。&lt;/p&gt;
+&lt;p&gt;需要说明的一点是，Spider类中的状态管理大量用到了Jdk Atomic原子包下的CAS并发原子类。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;7、CountableThreadPool&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;前面说过Spider采用的线程池对象CountableThreadPool内部封装了ExecutorService，CountableThreadPool 提供了额外的获取线程运行数的方法，此外为防止大量urls入池等待，提供了阻塞方式管理urls入池。&lt;br&gt;
+阻塞方式的实现是通过ReentrantLock和它的Condition来实现的。具体代码如下：&lt;/p&gt;
+&lt;div class=&#34;highlight&#34;&gt;&lt;div class=&#34;chroma&#34;&gt;
+&lt;table class=&#34;lntable&#34;&gt;&lt;tr&gt;&lt;td class=&#34;lntd&#34;&gt;
+&lt;pre class=&#34;chroma&#34;&gt;&lt;code&gt;&lt;span class=&#34;lnt&#34;&gt; 1
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt; 2
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt; 3
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt; 4
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt; 5
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt; 6
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt; 7
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt; 8
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt; 9
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt;10
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt;11
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt;12
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt;13
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt;14
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt;15
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt;16
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt;17
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt;18
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt;19
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt;20
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt;21
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt;22
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt;23
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt;24
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt;25
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt;26
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt;27
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt;28
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt;29
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt;30
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt;31
+&lt;/span&gt;&lt;span class=&#34;lnt&#34;&gt;32
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class=&#34;lntd&#34;&gt;
+&lt;pre class=&#34;chroma&#34;&gt;&lt;code class=&#34;language-java&#34; data-lang=&#34;java&#34;&gt;&lt;span class=&#34;kd&#34;&gt;public&lt;/span&gt; &lt;span class=&#34;kt&#34;&gt;void&lt;/span&gt; &lt;span class=&#34;nf&#34;&gt;execute&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;(&lt;/span&gt;&lt;span class=&#34;kd&#34;&gt;final&lt;/span&gt; &lt;span class=&#34;n&#34;&gt;Runnable&lt;/span&gt; &lt;span class=&#34;n&#34;&gt;runnable&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;)&lt;/span&gt; &lt;span class=&#34;o&#34;&gt;{&lt;/span&gt;
+        &lt;span class=&#34;k&#34;&gt;if&lt;/span&gt; &lt;span class=&#34;o&#34;&gt;(&lt;/span&gt;&lt;span class=&#34;n&#34;&gt;threadAlive&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;.&lt;/span&gt;&lt;span class=&#34;na&#34;&gt;get&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;()&lt;/span&gt; &lt;span class=&#34;o&#34;&gt;&amp;gt;=&lt;/span&gt; &lt;span class=&#34;n&#34;&gt;threadNum&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;)&lt;/span&gt; &lt;span class=&#34;o&#34;&gt;{&lt;/span&gt;
+            &lt;span class=&#34;k&#34;&gt;try&lt;/span&gt; &lt;span class=&#34;o&#34;&gt;{&lt;/span&gt;
+                &lt;span class=&#34;n&#34;&gt;reentrantLock&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;.&lt;/span&gt;&lt;span class=&#34;na&#34;&gt;lock&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;();&lt;/span&gt;
+                &lt;span class=&#34;k&#34;&gt;while&lt;/span&gt; &lt;span class=&#34;o&#34;&gt;(&lt;/span&gt;&lt;span class=&#34;n&#34;&gt;threadAlive&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;.&lt;/span&gt;&lt;span class=&#34;na&#34;&gt;get&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;()&lt;/span&gt; &lt;span class=&#34;o&#34;&gt;&amp;gt;=&lt;/span&gt; &lt;span class=&#34;n&#34;&gt;threadNum&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;)&lt;/span&gt; &lt;span class=&#34;o&#34;&gt;{&lt;/span&gt;
+                    &lt;span class=&#34;k&#34;&gt;try&lt;/span&gt; &lt;span class=&#34;o&#34;&gt;{&lt;/span&gt;
+                        &lt;span class=&#34;n&#34;&gt;condition&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;.&lt;/span&gt;&lt;span class=&#34;na&#34;&gt;await&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;();&lt;/span&gt;
+                    &lt;span class=&#34;o&#34;&gt;}&lt;/span&gt; &lt;span class=&#34;k&#34;&gt;catch&lt;/span&gt; &lt;span class=&#34;o&#34;&gt;(&lt;/span&gt;&lt;span class=&#34;n&#34;&gt;InterruptedException&lt;/span&gt; &lt;span class=&#34;n&#34;&gt;e&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;)&lt;/span&gt; &lt;span class=&#34;o&#34;&gt;{&lt;/span&gt;
+                    &lt;span class=&#34;o&#34;&gt;}&lt;/span&gt;
+                &lt;span class=&#34;o&#34;&gt;}&lt;/span&gt;
+            &lt;span class=&#34;o&#34;&gt;}&lt;/span&gt; &lt;span class=&#34;k&#34;&gt;finally&lt;/span&gt; &lt;span class=&#34;o&#34;&gt;{&lt;/span&gt;
+                &lt;span class=&#34;n&#34;&gt;reentrantLock&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;.&lt;/span&gt;&lt;span class=&#34;na&#34;&gt;unlock&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;();&lt;/span&gt;
+            &lt;span class=&#34;o&#34;&gt;}&lt;/span&gt;
+        &lt;span class=&#34;o&#34;&gt;}&lt;/span&gt;
+        &lt;span class=&#34;n&#34;&gt;threadAlive&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;.&lt;/span&gt;&lt;span class=&#34;na&#34;&gt;incrementAndGet&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;();&lt;/span&gt;
+        &lt;span class=&#34;n&#34;&gt;executorService&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;.&lt;/span&gt;&lt;span class=&#34;na&#34;&gt;execute&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;(&lt;/span&gt;&lt;span class=&#34;k&#34;&gt;new&lt;/span&gt; &lt;span class=&#34;n&#34;&gt;Runnable&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;()&lt;/span&gt; &lt;span class=&#34;o&#34;&gt;{&lt;/span&gt;
+            &lt;span class=&#34;nd&#34;&gt;@Override&lt;/span&gt;
+            &lt;span class=&#34;kd&#34;&gt;public&lt;/span&gt; &lt;span class=&#34;kt&#34;&gt;void&lt;/span&gt; &lt;span class=&#34;nf&#34;&gt;run&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;()&lt;/span&gt; &lt;span class=&#34;o&#34;&gt;{&lt;/span&gt;
+                &lt;span class=&#34;k&#34;&gt;try&lt;/span&gt; &lt;span class=&#34;o&#34;&gt;{&lt;/span&gt;
+                    &lt;span class=&#34;n&#34;&gt;runnable&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;.&lt;/span&gt;&lt;span class=&#34;na&#34;&gt;run&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;();&lt;/span&gt;
+                &lt;span class=&#34;o&#34;&gt;}&lt;/span&gt; &lt;span class=&#34;k&#34;&gt;finally&lt;/span&gt; &lt;span class=&#34;o&#34;&gt;{&lt;/span&gt;
+                    &lt;span class=&#34;k&#34;&gt;try&lt;/span&gt; &lt;span class=&#34;o&#34;&gt;{&lt;/span&gt;
+                        &lt;span class=&#34;n&#34;&gt;reentrantLock&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;.&lt;/span&gt;&lt;span class=&#34;na&#34;&gt;lock&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;();&lt;/span&gt;
+                        &lt;span class=&#34;n&#34;&gt;threadAlive&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;.&lt;/span&gt;&lt;span class=&#34;na&#34;&gt;decrementAndGet&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;();&lt;/span&gt;
+                        &lt;span class=&#34;n&#34;&gt;condition&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;.&lt;/span&gt;&lt;span class=&#34;na&#34;&gt;signal&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;();&lt;/span&gt;
+                    &lt;span class=&#34;o&#34;&gt;}&lt;/span&gt; &lt;span class=&#34;k&#34;&gt;finally&lt;/span&gt; &lt;span class=&#34;o&#34;&gt;{&lt;/span&gt;
+                        &lt;span class=&#34;n&#34;&gt;reentrantLock&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;.&lt;/span&gt;&lt;span class=&#34;na&#34;&gt;unlock&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;();&lt;/span&gt;
+                    &lt;span class=&#34;o&#34;&gt;}&lt;/span&gt;
+                &lt;span class=&#34;o&#34;&gt;}&lt;/span&gt;
+            &lt;span class=&#34;o&#34;&gt;}&lt;/span&gt;
+        &lt;span class=&#34;o&#34;&gt;});&lt;/span&gt;
+    &lt;span class=&#34;o&#34;&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;p&gt;逻辑是这样的，如果正在运行的线程数threadAlive超过允许的线程数，就阻塞等待，直至收到某个线程结束通知。&lt;/p&gt;
+&lt;p&gt;罗嗦一句，这里的线程安全控制，主要是用到了JDK atomic包来表示状态和ReentrantLock、Condition来控制达到类似生产者消费者的阻塞机制。&lt;/p&gt;
+&lt;p&gt;关于Spider就分析到这里，后续主题待定。&lt;/p&gt;
 </description>
                 
                 
